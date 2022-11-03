@@ -1,3 +1,54 @@
+#include <Utilities.h>
+using namespace RE;
+using std::unordered_map;
+
+REL::Relocation<uintptr_t> ptr_SprintCheck{ REL::ID(218087), 0x4C };
+
+PlayerCharacter* pc;
+PlayerCamera* pcam;
+PlayerControls* pcon;
+
+class TransformDeltaEventWatcher
+{
+public:
+	typedef BSEventNotifyControl (TransformDeltaEventWatcher::*FnProcessEvent)(BSTransformDeltaEvent& evn, BSTEventSource<BSTransformDeltaEvent>* dispatcher);
+
+	BSEventNotifyControl HookedProcessEvent(BSTransformDeltaEvent& evn, BSTEventSource<BSTransformDeltaEvent>* src)
+	{
+		ActorEx* a = (ActorEx*)((uintptr_t)this - 0x140);
+		if (a->GetDesiredSpeed() <= 0) {
+			evn.currentTranslation = evn.previousTranslation;
+			evn.deltaTranslation.pt[0] /= 5.f;
+			evn.deltaTranslation.pt[1] /= 5.f;
+			evn.deltaTranslation.pt[2] /= 5.f;
+		}
+		FnProcessEvent fn = fnHash.at(*(uint64_t*)this);
+		return fn ? (this->*fn)(evn, src) : BSEventNotifyControl::kContinue;
+	}
+
+	void HookSink()
+	{
+		uint64_t vtable = *(uint64_t*)this;
+		auto it = fnHash.find(vtable);
+		if (it == fnHash.end()) {
+			FnProcessEvent fn = SafeWrite64Function(vtable + 0x8, &TransformDeltaEventWatcher::HookedProcessEvent);
+			fnHash.insert(std::pair<uint64_t, FnProcessEvent>(vtable, fn));
+		}
+	}
+
+protected:
+	static unordered_map<uintptr_t, FnProcessEvent> fnHash;
+};
+unordered_map<uintptr_t, TransformDeltaEventWatcher::FnProcessEvent> TransformDeltaEventWatcher::fnHash;
+
+void InitializePlugin()
+{
+	pc = PlayerCharacter::GetSingleton();
+	((TransformDeltaEventWatcher*)((uintptr_t)pc + 0x140))->HookSink();
+	pcam = PlayerCamera::GetSingleton();
+	pcon = PlayerControls::GetSingleton();
+}
+
 extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Query(const F4SE::QueryInterface* a_f4se, F4SE::PluginInfo* a_info)
 {
 #ifndef NDEBUG
@@ -48,9 +99,15 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 {
 	F4SE::Init(a_f4se);
 
-	uintptr_t ptr_SprintCheck = REL::Relocation<uintptr_t>{ REL::ID(218087), 0x4C }.address();
 	uint8_t bytes[] = { 0xEB };
-	REL::safe_write<uint8_t>(ptr_SprintCheck, std::span{ bytes });
+	REL::safe_write<uint8_t>(ptr_SprintCheck.address(), std::span{ bytes });
+
+	const F4SE::MessagingInterface* message = F4SE::GetMessagingInterface();
+	message->RegisterListener([](F4SE::MessagingInterface::Message* msg) -> void {
+		if (msg->type == F4SE::MessagingInterface::kGameDataReady) {
+			InitializePlugin();
+		}
+	});
 
 	return true;
 }
